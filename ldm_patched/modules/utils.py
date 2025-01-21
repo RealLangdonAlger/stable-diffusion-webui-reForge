@@ -602,9 +602,30 @@ def copy_to_param(obj, attr, value):
 
 def get_attr(obj, attr):
     attrs = attr.split(".")
+    current = obj
+    
     for name in attrs:
-        obj = getattr(obj, name)
-    return obj
+        # Handle array/list indices
+        if name.isdigit():
+            current = current[int(name)]
+        else:
+            try:
+                current = getattr(current, name)
+            except AttributeError:
+                # If attribute not found and object is compiled, try _orig_mod
+                if hasattr(current, '_orig_mod'):
+                    try:
+                        current = getattr(current._orig_mod, name)
+                    except AttributeError:
+                        raise AttributeError(f"Neither {type(current)} nor its _orig_mod has attribute {name}")
+                else:
+                    raise
+            
+            # If we get a compiled module, get its original
+            if hasattr(current, '_orig_mod'):
+                current = current._orig_mod
+                
+    return current
 
 def bislerp(samples, width, height):
     def slerp(b1, b2, r):

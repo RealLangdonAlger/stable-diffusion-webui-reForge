@@ -1079,3 +1079,4 @@ class ModelPatcher:
 
     def __del__(self):
         self.detach(unpatch_all=False)
+        

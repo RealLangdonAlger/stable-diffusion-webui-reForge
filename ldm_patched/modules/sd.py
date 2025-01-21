@@ -907,3 +907,4 @@ def save_checkpoint(output_path, model, clip=None, vae=None, clip_vision=None, m
             sd[k] = t.contiguous()
 
     ldm_patched.modules.utils.save_torch_file(sd, output_path, metadata=metadata)
+    
