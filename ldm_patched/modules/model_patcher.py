@@ -412,6 +412,44 @@ class ModelPatcher:
                 return self.object_patches_backup[name]
             else:
                 return ldm_patched.modules.utils.get_attr(self.model, name)
+            
+    def restore_original_model(self):
+        if hasattr(self.model, '_orig_mod'):
+            patch_keys = list(self.object_patches_backup.keys())
+            for k in patch_keys:
+                ldm_patched.modules.utils.set_attr(self.model._orig_mod, k, self.object_patches_backup[k])
+        else:
+            patch_keys = list(self.object_patches_backup.keys())
+            for k in patch_keys:
+                ldm_patched.modules.utils.set_attr(self.model, k, self.object_patches_backup[k])
+        return patch_keys
+    def recompile_model(self, patch_keys=None):
+        if not hasattr(self.model, "compile_settings"):
+            return
+        compile_settings = self.model.compile_settings
+        if patch_keys:
+            for k in patch_keys:
+                if "diffusion_model." in k:
+                    key = k.replace('diffusion_model.', '')
+                    attributes = key.split('.')
+                    if hasattr(self.model, '_orig_mod'):
+                        block = self.model._orig_mod
+                    else:
+                        block = self.model
+                    for attr in attributes:
+                        if attr.isdigit():
+                            block = block[int(attr)]
+                        else:
+                            block = getattr(block, attr)
+                    # Compile the block
+                    compiled_block = torch.compile(
+                        block,
+                        mode=compile_settings["mode"],
+                        fullgraph=compile_settings.get("fullgraph", False),
+                        dynamic=compile_settings.get("dynamic", False),
+                        backend=compile_settings["backend"]
+                    )
+                    self.add_object_patch(k, compiled_block)
 
     def model_patches_to(self, device):
         to = self.model_options["transformer_options"]
@@ -442,6 +480,17 @@ class ModelPatcher:
         with self.use_ejected():
             p = set()
             model_sd = self.model.state_dict()
+            
+            # Create a mapping of keys without _orig_mod to keys with _orig_mod
+            key_mapping = {}
+            for k in model_sd.keys():
+                if k.startswith('_orig_mod.'):
+                    stripped_key = k[len('_orig_mod.'):]
+                    key_mapping[stripped_key] = k
+
+            logging.debug(f"Model keys available: {list(model_sd.keys())[:10]}...")
+            logging.debug(f"Patches to apply: {list(patches.keys())[:10]}...")
+            
             for k in patches:
                 offset = None
                 function = None
@@ -453,11 +502,17 @@ class ModelPatcher:
                     if len(k) > 2:
                         function = k[2]
 
-                if key in model_sd:
+                # Try to find the key both with and without _orig_mod prefix
+                actual_key = key_mapping.get(key, key)
+                
+                if actual_key in model_sd:
                     p.add(k)
-                    current_patches = self.patches.get(key, [])
+                    current_patches = self.patches.get(actual_key, [])
                     current_patches.append((strength_patch, patches[k], strength_model, offset, function))
-                    self.patches[key] = current_patches
+                    self.patches[actual_key] = current_patches
+                    logging.debug(f"Successfully applied patch for key: {key} -> {actual_key}")
+                else:
+                    logging.debug(f"Failed to find matching key in model: {key} (tried {actual_key})")
 
             self.patches_uuid = uuid.uuid4()
             return list(p)
@@ -498,6 +553,18 @@ class ModelPatcher:
     def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
         if key not in self.patches:
             return
+        
+        # Store original model if compiled
+        had_orig_mod = hasattr(self.model, '_orig_mod')
+        if had_orig_mod:
+            patch_keys = self.restore_original_model()
+
+        weight, set_func, convert_func = get_key_weight(self.model, key)
+        inplace_update = self.weight_inplace_update or inplace_update
+
+        if key not in self.backup:
+            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(
+                weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
 
         weight, set_func, convert_func = get_key_weight(self.model, key)
         inplace_update = self.weight_inplace_update or inplace_update
@@ -521,6 +588,9 @@ class ModelPatcher:
                 ldm_patched.modules.utils.set_attr_param(self.model, key, out_weight)
         else:
             set_func(out_weight, inplace_update=inplace_update, seed=string_to_seed(key))
+
+        if had_orig_mod:
+            self.recompile_model(patch_keys)
 
     def _load_list(self):
         loading = []
@@ -622,6 +692,14 @@ class ModelPatcher:
 
     def patch_model(self, device_to=None, lowvram_model_memory=0, load_weights=True, force_patch_weights=False):
         with self.use_ejected():
+            had_orig_mod = hasattr(self.model, '_orig_mod')
+            if had_orig_mod:
+                patch_keys = self.restore_original_model()
+
+            for k in self.object_patches:
+                old = ldm_patched.modules.utils.set_attr(self.model, k, self.object_patches[k])
+                if k not in self.object_patches_backup:
+                    self.object_patches_backup[k] = old
             for k in self.object_patches:
                 old = ldm_patched.modules.utils.set_attr(self.model, k, self.object_patches[k])
                 if k not in self.object_patches_backup:
@@ -638,6 +716,9 @@ class ModelPatcher:
 
             if load_weights:
                 self.load(device_to, lowvram_model_memory=lowvram_model_memory, force_patch_weights=force_patch_weights, full_load=full_load)
+
+            if had_orig_mod:
+                self.recompile_model(patch_keys)
         self.inject_model()
         return self.model
 
@@ -1079,3 +1160,4 @@ class ModelPatcher:
 
     def __del__(self):
         self.detach(unpatch_all=False)
+        
