@@ -232,10 +232,12 @@ def compile_model(unet, backend="inductor"):
             if hasattr(unet.model, '_inductor_version'):
                 print(f"Inductor version: {unet.model._inductor_version}")
             
+            unet.compiled = True
             print("\nUNet model compilation successful")
             return True
             
         except Exception as e:
+            unet.compiled = False
             print(f"\nError during model compilation: {str(e)}")
             print("Stack trace:")
             import traceback
