@@ -273,18 +273,31 @@ def model_lora_keys_clip(model, key_map={}):
     return key_map
 
 def model_lora_keys_unet(model, key_map={}):
+    # Get original model if compiled
+    if hasattr(model, '_orig_mod'):
+        logging.debug("Using _orig_mod for LoRA key mapping")
+        model = model._orig_mod
+    
     sd = model.state_dict()
     sdk = sd.keys()
-
+    
+    # Create a mapping to handle _orig_mod prefix
+    orig_mod_prefix = '_orig_mod.' if any(k.startswith('_orig_mod.') for k in sdk) else ''
+    
     for k in sdk:
+        # Remove _orig_mod prefix if present
+        if k.startswith('_orig_mod.'):
+            k = k[len('_orig_mod.'):]
+            
         if k.startswith("diffusion_model."):
             if k.endswith(".weight"):
                 key_lora = k[len("diffusion_model."):-len(".weight")].replace(".", "_")
-                key_map["lora_unet_{}".format(key_lora)] = k
-                # key_map["lora_prior_unet_{}".format(key_lora)] = k #cascade lora: TODO put lora key prefix in the model config
-                key_map["{}".format(k[:-len(".weight")])] = k #generic lora format without any weird key names
+                # Map both with and without _orig_mod prefix
+                key_map["lora_unet_{}".format(key_lora)] = f"{orig_mod_prefix}{k}"
+                key_map["{}".format(k[:-len(".weight")])] = f"{orig_mod_prefix}{k}"
+                logging.debug(f"Mapped key {k} to lora_unet_{key_lora}")
             else:
-                key_map["{}".format(k)] = k #generic lora format for not .weight without any weird key names
+                key_map["{}".format(k)] = f"{orig_mod_prefix}{k}"
 
     diffusers_keys = ldm_patched.modules.utils.unet_to_diffusers(model.model_config.unet_config)
     for k in diffusers_keys:
@@ -389,6 +402,7 @@ def pad_tensor_to_shape(tensor: torch.Tensor, new_shape: list[int]) -> torch.Ten
     return padded_tensor
 
 def calculate_weight(patches, weight, key, intermediate_dtype=torch.float32, original_weights=None):
+    key = key[len('_orig_mod.'):] if key.startswith('_orig_mod.') else key
     for p in patches:
         strength = p[0]
         v = p[1]
