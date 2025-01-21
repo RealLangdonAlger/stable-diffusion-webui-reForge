@@ -171,28 +171,79 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
 def compile_model(unet, backend="inductor"):
     """Compile the UNet model and store compilation settings."""
     if hasattr(torch, 'compile'):
-        compile_settings = {
-            "mode": "default",
-            "backend": backend,
-            "fullgraph": False,
-            "dynamic": False
-        }
-        
-        # Store settings before compilation
-        unet.model.compile_settings = compile_settings
-        
-        # Compile the model
-        unet.model = torch.compile(
-            unet.model,
-            mode=compile_settings["mode"],
-            fullgraph=compile_settings["fullgraph"],
-            dynamic=compile_settings["dynamic"],
-            backend=compile_settings["backend"]
-        )
-        
-        print(f"UNet model compilation successful")
+        try:
+            # Get torch version check done first
+            torch_version = torch.__version__.split('.')
+            if int(torch_version[0]) < 2:
+                print(f"torch.compile requires PyTorch 2.0 or newer. Current version: {torch.__version__}")
+                return
+
+            # Configure dynamo
+            import torch._dynamo as dynamo
+            dynamo.config.suppress_errors = True
+            dynamo.config.verbose = True
+
+            compile_settings = {}
+            
+            if args.torch_compile_mode == "max-autotune":
+                compile_settings = {
+                    "backend": backend,
+                    "mode": None,  # Mode is ignored when using options
+                    "fullgraph": False,
+                    "options": {
+                        "max_autotune": True,
+                        "max_autotune_gemm": True,
+                        "max_autotune_pointwise": True,
+                        "trace.enabled": True,
+                        "trace.graph_diagram": True,
+                        "epilogue_fusion": True,
+                        "layout_optimization": True,
+                        "aggressive_fusion": True
+                    }
+                }
+                print("\nUsing max-autotune compilation settings:")
+                for option, value in compile_settings["options"].items():
+                    print(f"  - {option}: {value}")
+            else:
+                compile_settings = {
+                    "mode": args.torch_compile_mode,
+                    "backend": backend,
+                    "fullgraph": False,
+                    "dynamic": False
+                }
+                print("\nUsing standard compilation settings:")
+                for setting, value in compile_settings.items():
+                    print(f"  - {setting}: {value}")
+            
+            # Store settings before compilation
+            unet.model.compile_settings = compile_settings
+            
+            # Compile the model
+            print(f"\nStarting model compilation with backend '{backend}' and mode '{args.torch_compile_mode}'")
+            unet.model = torch.compile(
+                unet.model,
+                **compile_settings
+            )
+            
+            # Verify compilation
+            print("\nVerifying compilation results:")
+            print(f"Model type after compilation: {type(unet.model)}")
+            print(f"Has _orig_mod attribute: {'_orig_mod' in dir(unet.model)}")
+            if hasattr(unet.model, '_inductor_version'):
+                print(f"Inductor version: {unet.model._inductor_version}")
+            
+            print("\nUNet model compilation successful")
+            return True
+            
+        except Exception as e:
+            print(f"\nError during model compilation: {str(e)}")
+            print("Stack trace:")
+            import traceback
+            traceback.print_exc()
+            return False
     else:
         print("Warning: torch.compile not available in this PyTorch version")
+        return False
 
 
 @torch.no_grad()
