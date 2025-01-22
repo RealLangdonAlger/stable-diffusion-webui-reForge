@@ -193,11 +193,8 @@ def load_lora(lora, to_load, log_missing=True):
             patch_dict[to_load[x]] = ("set", (set_weight,))
             loaded_keys.add(set_weight_name)
 
-    if log_missing:
-        for x in lora.keys():
-            if x not in loaded_keys:
-                logging.warning("lora key not loaded: {}".format(x))
-    return patch_dict
+    remaining_dict = {x: y for x, y in lora.items() if x not in loaded_keys}
+    return patch_dict, remaining_dict
 
 def model_lora_keys_clip(model, key_map={}):
     sdk = model.state_dict().keys()

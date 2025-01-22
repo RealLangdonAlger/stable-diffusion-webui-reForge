@@ -156,6 +156,7 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, filen
 
     return model, clip
 
+
 class CLIP:
     def __init__(self, target=None, embedding_directory=None, no_init=False, tokenizer_data={}, parameters=0, model_options={}):
         if no_init:
