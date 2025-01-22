@@ -43,24 +43,28 @@ class UnetPatcher(ModelPatcher):
         key_mapping = {}
         state_keys = list(model_sd.keys())
         
+        # Detect if we're using compiled model
+        is_compiled = any(k.startswith('_orig_mod.') or k.startswith('diffusion_model._orig_mod.') for k in state_keys)
+
         for k in state_keys:
-            # Handle diffusion_model._orig_mod prefix
+            raw_key = k
+            # Handle prefixes for compiled model
             if k.startswith('diffusion_model._orig_mod.'):
                 raw_key = k[len('diffusion_model._orig_mod.'):]
-                mapped_key = f"diffusion_model.{raw_key}"
-                key_mapping[mapped_key] = k
-                key_mapping[raw_key] = k
-            # Handle _orig_mod prefix
             elif k.startswith('_orig_mod.'):
                 raw_key = k[len('_orig_mod.'):]
-                mapped_key = f"diffusion_model.{raw_key}"
-                key_mapping[mapped_key] = k
-                key_mapping[raw_key] = k
-            # No prefix
-            else:
-                mapped_key = f"diffusion_model.{k}"
-                key_mapping[mapped_key] = k
+            elif k.startswith('diffusion_model.'):
+                raw_key = k[len('diffusion_model.'):]
+                
+            # Map all variations
+            key_mapping[raw_key] = k
+            key_mapping[f"diffusion_model.{raw_key}"] = k
+            
+            # For non-compiled models, also map directly
+            if not is_compiled:
                 key_mapping[k] = k
+                if not k.startswith('diffusion_model.'):
+                    key_mapping[f"diffusion_model.{k}"] = k
 
         for k in patches:
             offset = None
