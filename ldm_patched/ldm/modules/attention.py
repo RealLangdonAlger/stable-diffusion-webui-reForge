@@ -981,3 +981,4 @@ class SpatialVideoTransformer(SpatialTransformer):
             x = self.proj_out(x)
         out = x + x_in
         return out
+
