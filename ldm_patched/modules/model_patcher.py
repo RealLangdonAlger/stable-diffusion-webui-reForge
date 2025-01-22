@@ -33,8 +33,6 @@ import ldm_patched.hooks
 import ldm_patched.modules.patcher_extension
 from ldm_patched.modules.patcher_extension import CallbacksMP, WrappersMP, PatcherInjection
 from ldm_patched.modules.types import UnetWrapperFunction
-import collections
-import ldm_patched.float
 
 extra_weight_calculators = {}
 
@@ -58,17 +56,6 @@ def weight_decompose(dora_scale, weight, lora_diff, alpha, strength):
     else:
         weight[:] = weight_calc
     return weight
-
-def string_to_seed(s):
-    """Convert a string into a seed integer by using a simple hash function."""
-    if hasattr(s, 'encode'):
-        s = s.encode()
-    seed = 0
-    for byte in s:
-        if isinstance(byte, str):
-            byte = ord(byte)
-        seed = ((seed * 33) + byte) & 0xFFFFFFFF
-    return seed
 
 
 def set_model_options_patch_replace(model_options, patch, name, block_name, number, transformer_index=None):
@@ -497,76 +484,18 @@ class ModelPatcher:
     def model_dtype(self):
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
-    
-    import contextlib
-    @contextlib.contextmanager
-    def use_ejected(self, skip_and_inject_on_exit_only=False):
-        was_injected = False
-        prev_skip_injection = getattr(self, 'skip_injection', False)
-        
-        try:
-            if skip_and_inject_on_exit_only:
-                self.skip_injection = True
-                
-            if getattr(self, 'is_injected', False):
-                if hasattr(self, 'eject_model'):
-                    self.eject_model()
-                was_injected = True
-                
-            yield
-            
-        finally:
-            if skip_and_inject_on_exit_only:
-                self.skip_injection = prev_skip_injection
-                if hasattr(self, 'inject_model'):
-                    self.inject_model()
-                    
-            if was_injected and not getattr(self, 'skip_injection', False):
-                if hasattr(self, 'inject_model'):
-                    self.inject_model()
-                    
-            self.skip_injection = prev_skip_injection
 
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
-        with self.use_ejected():
-            p = set()
-            model_sd = self.model.state_dict()
-            
-            # Create a mapping of keys without _orig_mod to keys with _orig_mod
-            key_mapping = {}
-            for k in model_sd.keys():
-                if k.startswith('_orig_mod.'):
-                    stripped_key = k[len('_orig_mod.'):]
-                    key_mapping[stripped_key] = k
+        p = set()
+        for k in patches:
+            if k in self.model_keys:
+                p.add(k)
+                current_patches = self.patches.get(k, [])
+                current_patches.append((strength_patch, patches[k], strength_model))
+                self.patches[k] = current_patches
 
-            logging.debug(f"Model keys available: {list(model_sd.keys())[:10]}...")
-            logging.debug(f"Patches to apply: {list(patches.keys())[:10]}...")
-            
-            for k in patches:
-                offset = None
-                function = None
-                if isinstance(k, str):
-                    key = k
-                else:
-                    offset = k[1]
-                    key = k[0]
-                    if len(k) > 2:
-                        function = k[2]
-
-                # Try to find the key both with and without _orig_mod prefix
-                actual_key = key_mapping.get(key, key)
-                
-                if actual_key in model_sd:
-                    p.add(k)
-                    current_patches = self.patches.get(actual_key, [])
-                    current_patches.append((strength_patch, patches[k], strength_model, offset, function))
-                    self.patches[actual_key] = current_patches
-                    logging.debug(f"Successfully applied patch for key: {key} -> {actual_key}")
-                else:
-                    logging.debug(f"Failed to find matching key in model: {key} (tried {actual_key})")
-
-            self.patches_uuid = uuid.uuid4()
-            return list(p)
+        self.patches_uuid = uuid.uuid4()
+        return list(p)
 
     def get_key_patches(self, filter_prefix=None):
         model_sd = self.model_state_dict()
@@ -601,28 +530,22 @@ class ModelPatcher:
         return sd
     
     def restore_original_model(self):
-        patch_keys = []  # Initialize patch_keys at the start
-        
-        if hasattr(self.model, 'diffusion_model'):  # Check if it's UNet
-            if hasattr(self.model.diffusion_model, '_orig_mod'):
-                patch_keys = list(self.object_patches_backup.keys())
-                for k in patch_keys:
-                    if "diffusion_model." in k:
-                        ldm_patched.modules.utils.set_attr(self.model.diffusion_model._orig_mod, k.replace('diffusion_model.', ''), self.object_patches_backup[k])
-        elif hasattr(self.model, '_orig_mod'):  # Handle CLIP and other models
+        if hasattr(self.model, '_orig_mod'):
             patch_keys = list(self.object_patches_backup.keys())
             for k in patch_keys:
                 ldm_patched.modules.utils.set_attr(self.model._orig_mod, k, self.object_patches_backup[k])
-                
+        else:
+            patch_keys = list(self.object_patches_backup.keys())
+            for k in patch_keys:
+                ldm_patched.modules.utils.set_attr(self.model, k, self.object_patches_backup[k])
         return patch_keys
 
     def recompile_model(self, patch_keys=None):
-        if patch_keys is None:
+        if not hasattr(self.model, "compile_settings"):
             return
-            
-        # Handle UNet compilation
-        if hasattr(self.model, 'diffusion_model') and hasattr(self.model.diffusion_model, "compile_settings"):
-            compile_settings = self.model.diffusion_model.compile_settings
+
+        compile_settings = self.model.compile_settings
+        if patch_keys:
             for k in patch_keys:
                 if "diffusion_model." in k:
                     key = k.replace('diffusion_model.', '')
@@ -634,66 +557,28 @@ class ModelPatcher:
                         else:
                             block = getattr(block, attr)
 
+                    # Compile the block
                     compiled_block = torch.compile(
                         block,
-                        **compile_settings
+                        mode=compile_settings["mode"],
+                        fullgraph=compile_settings.get("fullgraph", False),
+                        dynamic=compile_settings.get("dynamic", False),
+                        backend=compile_settings["backend"]
                     )
-                    # Set the compiled block back
-                    parent = self.model.diffusion_model._orig_mod
-                    for attr in attributes[:-1]:
-                        if attr.isdigit():
-                            parent = parent[int(attr)]
-                        else:
-                            parent = getattr(parent, attr)
-                    setattr(parent, attributes[-1], compiled_block)
-        
-        # Handle CLIP and other models
-        elif hasattr(self.model, "compile_settings"):
-            compile_settings = self.model.compile_settings
-            for k in patch_keys:
-                attributes = k.split('.')
-                block = self.model._orig_mod
-                for attr in attributes[:-1]:
-                    if attr.isdigit():
-                        block = block[int(attr)]
-                    else:
-                        block = getattr(block, attr)
-                
-                compiled_block = torch.compile(
-                    block,
-                    **compile_settings
-                )
-                # Set the compiled block back
-                parent = self.model._orig_mod
-                for attr in attributes[:-1]:
-                    if attr.isdigit():
-                        parent = parent[int(attr)]
-                    else:
-                        parent = getattr(parent, attr)
-                setattr(parent, attributes[-1], compiled_block)
+                    self.add_object_patch(k, compiled_block)
 
-
-    def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
+    def patch_weight_to_device(self, key, device_to=None):
         if key not in self.patches:
             return
-        
-        # Store original model if compiled
-        had_orig_mod = hasattr(self.model, '_orig_mod')
-        if had_orig_mod:
-            patch_keys = self.restore_original_model()
 
-        weight, set_func, convert_func = get_key_weight(self.model, key)
-        inplace_update = self.weight_inplace_update or inplace_update
+        if hasattr(self.model, '_orig_mod'):
+            weight = ldm_patched.modules.utils.get_attr(self.model._orig_mod, key)
+        else:
+            weight = ldm_patched.modules.utils.get_attr(self.model, key)
 
+        inplace_update = self.weight_inplace_update
         if key not in self.backup:
-            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(
-                weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
-
-        weight, set_func, convert_func = get_key_weight(self.model, key)
-        inplace_update = self.weight_inplace_update or inplace_update
-
-        if key not in self.backup:
-            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
+            self.backup[key] = weight.to(device=self.offload_device, copy=inplace_update)
 
         if device_to is not None:
             temp_weight = ldm_patched.modules.model_management.cast_to_device(weight, device_to, torch.float32, copy=True)
@@ -702,18 +587,18 @@ class ModelPatcher:
         if convert_func is not None:
             temp_weight = convert_func(temp_weight, inplace=True)
 
-        out_weight = ldm_patched.modules.lora.calculate_weight(self.patches[key], temp_weight, key)
-        if set_func is None:
-            out_weight = ldm_patched.float.stochastic_rounding(out_weight, weight.dtype, seed=string_to_seed(key))
-            if inplace_update:
+        out_weight = self.calculate_weight(self.patches[key], temp_weight, key).to(weight.dtype)
+
+        if inplace_update:
+            if hasattr(self.model, '_orig_mod'):
+                ldm_patched.modules.utils.copy_to_param(self.model._orig_mod, key, out_weight)
+            else:
                 ldm_patched.modules.utils.copy_to_param(self.model, key, out_weight)
+        else:
+            if hasattr(self.model, '_orig_mod'):
+                ldm_patched.modules.utils.set_attr_param(self.model._orig_mod, key, out_weight)
             else:
                 ldm_patched.modules.utils.set_attr_param(self.model, key, out_weight)
-        else:
-            set_func(out_weight, inplace_update=inplace_update, seed=string_to_seed(key))
-
-        if had_orig_mod:
-            self.recompile_model(patch_keys)
 
     def patch_model(self, device_to=None, patch_weights=True):
         # First restore original model if needed
@@ -873,14 +758,13 @@ class ModelPatcher:
 
             keys = list(self.backup.keys())
 
-            for k in keys:
-                bk = self.backup[k]
-                if bk.inplace_update:
-                    ldm_patched.modules.utils.copy_to_param(self.model, k, bk.weight)
-                else:
-                    ldm_patched.modules.utils.set_attr_param(self.model, k, bk.weight)
+            if self.weight_inplace_update:
+                for k in keys:
+                    ldm_patched.modules.utils.copy_to_param(self.model, k, self.backup[k])
+            else:
+                for k in keys:
+                    ldm_patched.modules.utils.set_attr_param(self.model, k, self.backup[k])
 
-            self.model.current_weight_patches_uuid = None
             self.backup.clear()
 
             if device_to is not None:

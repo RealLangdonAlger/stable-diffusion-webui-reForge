@@ -276,87 +276,38 @@ def model_lora_keys_clip(model, key_map={}):
     return key_map
 
 def model_lora_keys_unet(model, key_map={}):
+    """
+    Maps LoRA keys to model keys, handling both compiled and non-compiled models.
+    """
     # Get original model if compiled
-    if hasattr(model, '_orig_mod'):
-        logging.debug("Using _orig_mod for LoRA key mapping")
-        model = model._orig_mod
-    
-    sd = model.state_dict()
-    sdk = sd.keys()
-    
-    # Create a mapping to handle _orig_mod prefix
-    orig_mod_prefix = '_orig_mod.' if any(k.startswith('_orig_mod.') for k in sdk) else ''
-    
-    for k in sdk:
-        # Remove _orig_mod prefix if present
-        if k.startswith('_orig_mod.'):
-            k = k[len('_orig_mod.'):]
-            
-        if k.startswith("diffusion_model."):
-            if k.endswith(".weight"):
-                key_lora = k[len("diffusion_model."):-len(".weight")].replace(".", "_")
-                # Map both with and without _orig_mod prefix
-                key_map["lora_unet_{}".format(key_lora)] = f"{orig_mod_prefix}{k}"
-                key_map["{}".format(k[:-len(".weight")])] = f"{orig_mod_prefix}{k}"
-                logging.debug(f"Mapped key {k} to lora_unet_{key_lora}")
-            else:
-                key_map["{}".format(k)] = f"{orig_mod_prefix}{k}"
+    actual_model = model._orig_mod if hasattr(model, '_orig_mod') else model
 
-    diffusers_keys = ldm_patched.modules.utils.unet_to_diffusers(model.model_config.unet_config)
+    # Get state dict and handle _orig_mod prefix
+    model_sd = actual_model.state_dict()
+
+    for k in model_sd:
+        if k.startswith("diffusion_model.") and k.endswith(".weight"):
+            key_lora = k[len("diffusion_model."):-len(".weight")].replace(".", "_")
+            key_map[f"lora_unet_{key_lora}"] = k
+            key_map[f"lora_prior_unet_{key_lora}"] = k
+
+    # Map diffusers-style keys
+    diffusers_keys = ldm_patched.modules.utils.unet_to_diffusers(actual_model.model_config.unet_config)
     for k in diffusers_keys:
         if k.endswith(".weight"):
-            unet_key = "diffusion_model.{}".format(diffusers_keys[k])
-            key_lora = k[:-len(".weight")].replace(".", "_")
-            key_map["lora_unet_{}".format(key_lora)] = unet_key
-            key_map["lycoris_{}".format(key_lora)] = unet_key #simpletuner lycoris format
-
-            diffusers_lora_prefix = ["", "unet."]
-            for p in diffusers_lora_prefix:
-                diffusers_lora_key = "{}{}".format(p, k[:-len(".weight")].replace(".to_", ".processor.to_"))
-                if diffusers_lora_key.endswith(".to_out.0"):
-                    diffusers_lora_key = diffusers_lora_key[:-2]
-                key_map[diffusers_lora_key] = unet_key
-
-    if isinstance(model, ldm_patched.modules.model_base.SD3): #Diffusers lora SD3
-        diffusers_keys = ldm_patched.modules.utils.mmdit_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")
-        for k in diffusers_keys:
-            if k.endswith(".weight"):
-                to = diffusers_keys[k]
-                key_lora = "transformer.{}".format(k[:-len(".weight")]) #regular diffusers sd3 lora format
-                key_map[key_lora] = to
-
-                key_lora = "base_model.model.{}".format(k[:-len(".weight")]) #format for flash-sd3 lora and others?
-                key_map[key_lora] = to
-
-                key_lora = "lora_transformer_{}".format(k[:-len(".weight")].replace(".", "_")) #OneTrainer lora
-                key_map[key_lora] = to
-
-                key_lora = "lycoris_{}".format(k[:-len(".weight")].replace(".", "_")) #simpletuner lycoris format
-                key_map[key_lora] = to
-
-    if isinstance(model, ldm_patched.modules.model_base.AuraFlow): #Diffusers lora AuraFlow
-        diffusers_keys = ldm_patched.modules.utils.auraflow_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")
-        for k in diffusers_keys:
-            if k.endswith(".weight"):
-                to = diffusers_keys[k]
-                key_lora = "transformer.{}".format(k[:-len(".weight")]) #simpletrainer and probably regular diffusers lora format
-                key_map[key_lora] = to
+            unet_key = f"diffusion_model.{diffusers_keys[k]}"
+            if unet_key in model_sd:
+                # Handle both original and diffusers-style LoRA keys
+                key_lora = k[:-len(".weight")].replace(".", "_")
+                key_map[f"lora_unet_{key_lora}"] = unet_key
                 
-    if isinstance(model, ldm_patched.modules.model_base.HunyuanDiT):
-        for k in sdk:
-            if k.startswith("diffusion_model.") and k.endswith(".weight"):
-                key_lora = k[len("diffusion_model."):-len(".weight")]
-                key_map["base_model.model.{}".format(key_lora)] = k #official hunyuan lora format
+                diffusers_lora_prefix = ["", "unet."]
+                for p in diffusers_lora_prefix:
+                    diffusers_lora_key = f"{p}{k[:-len('.weight')].replace('.to_', '.processor.to_')}"
+                    if diffusers_lora_key.endswith(".to_out.0"):
+                        diffusers_lora_key = diffusers_lora_key[:-2]
+                    key_map[diffusers_lora_key] = unet_key
 
-    if isinstance(model, ldm_patched.modules.model_base.Flux): #Diffusers lora Flux
-        diffusers_keys = ldm_patched.modules.utils.flux_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")
-        for k in diffusers_keys:
-            if k.endswith(".weight"):
-                to = diffusers_keys[k]
-                key_map["transformer.{}".format(k[:-len(".weight")])] = to #simpletrainer and probably regular diffusers flux lora format
-                key_map["lycoris_{}".format(k[:-len(".weight")].replace(".", "_"))] = to #simpletrainer lycoris
-                key_map["lora_transformer_{}".format(k[:-len(".weight")].replace(".", "_"))] = to #onetrainer
-                
     return key_map
 
 
