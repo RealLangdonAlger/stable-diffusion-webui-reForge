@@ -584,10 +584,15 @@ def safetensors_header(safetensors_path, max_size=100*1024*1024):
 def set_attr(obj, attr, value):
     attrs = attr.split(".")
     for name in attrs[:-1]:
-        obj = getattr(obj, name)
+        if hasattr(obj, '_orig_mod'):
+            obj = obj._orig_mod
+        if name.isdigit():
+            obj = obj[int(name)]
+        else:
+            obj = getattr(obj, name)
     prev = getattr(obj, attrs[-1])
-    setattr(obj, attrs[-1], torch.nn.Parameter(value, requires_grad=False))
-    del prev
+    setattr(obj, attrs[-1], value)
+    return prev
 
 def set_attr_param(obj, attr, value):
     return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
@@ -596,7 +601,12 @@ def copy_to_param(obj, attr, value):
     # inplace update tensor instead of replacing it
     attrs = attr.split(".")
     for name in attrs[:-1]:
-        obj = getattr(obj, name)
+        if hasattr(obj, '_orig_mod'):
+            obj = obj._orig_mod
+        if name.isdigit():
+            obj = obj[int(name)]
+        else:
+            obj = getattr(obj, name)
     prev = getattr(obj, attrs[-1])
     prev.data.copy_(value)
 
@@ -604,27 +614,27 @@ def get_attr(obj, attr):
     attrs = attr.split(".")
     current = obj
     
+    def get_attr_with_orig(obj, name):
+        try:
+            return getattr(obj, name)
+        except AttributeError:
+            if hasattr(obj, '_orig_mod'):
+                return getattr(obj._orig_mod, name)
+            raise
+
     for name in attrs:
         # Handle array/list indices
         if name.isdigit():
             current = current[int(name)]
         else:
             try:
-                current = getattr(current, name)
+                current = get_attr_with_orig(current, name)
             except AttributeError:
-                # If attribute not found and object is compiled, try _orig_mod
                 if hasattr(current, '_orig_mod'):
-                    try:
-                        current = getattr(current._orig_mod, name)
-                    except AttributeError:
-                        raise AttributeError(f"Neither {type(current)} nor its _orig_mod has attribute {name}")
+                    current = get_attr_with_orig(current._orig_mod, name)
                 else:
                     raise
-            
-            # If we get a compiled module, get its original
-            if hasattr(current, '_orig_mod'):
-                current = current._orig_mod
-                
+
     return current
 
 def bislerp(samples, width, height):
