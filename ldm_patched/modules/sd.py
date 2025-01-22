@@ -65,7 +65,7 @@ def load_clip_weights(model, sd):
     return load_model_weights(model, sd)
 
 def load_lora_for_models(model, clip, lora, strength_model, strength_clip, filename='default'):
-    # Get original model type, handling compiled models
+    # Handle compiled models when getting model type
     if model is not None:
         if hasattr(model.model, '_orig_mod'):
             model_flag = type(model.model._orig_mod).__name__
@@ -74,21 +74,26 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, filen
     else:
         model_flag = 'default'
 
-    # Restore original model state before applying LoRA
-    if model is not None and hasattr(model, 'object_patches_backup'):
-        patch_keys = list(model.object_patches_backup.keys())
-        for k in patch_keys:
-            ldm_patched.modules.utils.set_attr(model.model, k, model.object_patches_backup[k])
-
     # Only build key maps for components we'll actually use
     key_map = {}
     if model is not None and strength_model != 0:
-        if hasattr(model.model, '_orig_mod'):
-            key_map = ldm_patched.modules.lora.model_lora_keys_unet(model.model._orig_mod, key_map)
-        else:
-            key_map = ldm_patched.modules.lora.model_lora_keys_unet(model.model, key_map)
+        # Handle compiled UNet model
+        target_model = model.model
+        if hasattr(target_model, 'diffusion_model'):
+            target_model = target_model.diffusion_model
+            if hasattr(target_model, '_orig_mod'):
+                target_model = target_model._orig_mod
+        elif hasattr(target_model, '_orig_mod'):
+            target_model = target_model._orig_mod
+            
+        key_map = ldm_patched.modules.lora.model_lora_keys_unet(target_model, key_map)
+        
     if clip is not None and strength_clip != 0:
-        key_map = ldm_patched.modules.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
+        # Handle compiled CLIP model
+        clip_model = clip.cond_stage_model
+        if hasattr(clip_model, '_orig_mod'):
+            clip_model = clip_model._orig_mod
+        key_map = ldm_patched.modules.lora.model_lora_keys_clip(clip_model, key_map)
 
     # If we have no keys to process, return early
     if not key_map:
@@ -116,34 +121,6 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, filen
     if loaded_keys_unet or loaded_keys_clip:
         total_loaded_keys = len(loaded_keys_unet) + len(loaded_keys_clip)
         print(f'[LORA] Loaded {filename} for {model_flag} with {total_loaded_keys} keys (UNet: {len(loaded_keys_unet)}, CLIP: {len(loaded_keys_clip)}) at weight {strength_clip}')
-
-    # Recompile object patches if model was compiled
-    if model is not None and hasattr(model, 'object_patches_backup'):
-        patch_keys = list(model.object_patches_backup.keys())
-        if hasattr(new_modelpatcher.model, "compile_settings"):
-            compile_settings = getattr(new_modelpatcher.model, "compile_settings")
-            for k in patch_keys:
-                if "diffusion_model." in k:
-                    # Get the actual block by following the attribute path
-                    key = k.replace('diffusion_model.', '')
-                    attributes = key.split('.')
-                    block = new_modelpatcher.get_model_object("diffusion_model")
-                    if hasattr(block, '_orig_mod'):
-                        block = block._orig_mod
-                    for attr in attributes:
-                        if attr.isdigit():
-                            block = block[int(attr)]
-                        else:
-                            block = getattr(block, attr)
-                    # Recompile the block with same settings
-                    compiled_block = torch.compile(
-                        block,
-                        mode=compile_settings["mode"],
-                        fullgraph=compile_settings.get("fullgraph", False),
-                        dynamic=compile_settings.get("dynamic", False),
-                        backend=compile_settings["backend"]
-                    )
-                    new_modelpatcher.add_object_patch(k, compiled_block)
 
     return (new_modelpatcher, new_clip)
 
