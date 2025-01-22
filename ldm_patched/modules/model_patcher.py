@@ -37,18 +37,27 @@ from ldm_patched.modules.types import UnetWrapperFunction
 
 extra_weight_calculators = {}
 
-def string_to_seed(data):
-    crc = 0xFFFFFFFF
-    for byte in data:
-        if isinstance(byte, str):
-            byte = ord(byte)
-        crc ^= byte
-        for _ in range(8):
-            if crc & 1:
-                crc = (crc >> 1) ^ 0xEDB88320
-            else:
-                crc >>= 1
-    return crc ^ 0xFFFFFFFF
+
+def weight_decompose(dora_scale, weight, lora_diff, alpha, strength):
+    dora_scale = ldm_patched.modules.model_management.cast_to_device(dora_scale, weight.device, torch.float32)
+    lora_diff *= alpha
+    weight_calc = weight + lora_diff.type(weight.dtype)
+    weight_norm = (
+        weight_calc.transpose(0, 1)
+        .reshape(weight_calc.shape[1], -1)
+        .norm(dim=1, keepdim=True)
+        .reshape(weight_calc.shape[1], *[1] * (weight_calc.dim() - 1))
+        .transpose(0, 1)
+    )
+
+    weight_calc *= (dora_scale / weight_norm).type(weight.dtype)
+    if strength != 1.0:
+        weight_calc -= weight
+        weight += strength * (weight_calc)
+    else:
+        weight[:] = weight_calc
+    return weight
+
 
 def set_model_options_patch_replace(model_options, patch, name, block_name, number, transformer_index=None):
     to = model_options["transformer_options"].copy()
@@ -512,50 +521,16 @@ class ModelPatcher:
             return self.model.get_dtype()
 
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
-        with self.use_ejected():
-            p = set()
-            model_sd = self.model.state_dict()
-            
-            # Create mapping for keys with and without diffusion_model prefix
-            key_mapping = {}
-            needs_prefix = not any(k.startswith("diffusion_model.") for k in model_sd.keys())
-            
-            for k in model_sd.keys():
-                # Map both with and without prefix
-                if needs_prefix:
-                    key_mapping[f"diffusion_model.{k}"] = k
-                    key_mapping[k] = k
-                else:
-                    key_mapping[k] = k
-                    if k.startswith("diffusion_model."):
-                        key_mapping[k[len("diffusion_model."):]] = k
+        p = set()
+        for k in patches:
+            if k in self.model_keys:
+                p.add(k)
+                current_patches = self.patches.get(k, [])
+                current_patches.append((strength_patch, patches[k], strength_model))
+                self.patches[k] = current_patches
 
-            for k in patches:
-                offset = None
-                function = None
-                if isinstance(k, str):
-                    key = k
-                else:
-                    offset = k[1]
-                    key = k[0]
-                    if len(k) > 2:
-                        function = k[2]
-
-                # Try to find the key in our mapping
-                actual_key = key_mapping.get(key)
-                
-                if actual_key is not None and actual_key in model_sd:
-                    p.add(k)
-                    current_patches = self.patches.get(actual_key, [])
-                    current_patches.append((strength_patch, patches[k], strength_model, offset, function))
-                    self.patches[actual_key] = current_patches
-                    # print(f"Successfully applied patch for key: {key} -> {actual_key}")
-                else:
-                    # print(f"Failed to find matching key in model: {key}")
-                    pass
-
-            self.patches_uuid = uuid.uuid4()
-            return list(p)
+        self.patches_uuid = uuid.uuid4()
+        return list(p)
 
     def get_key_patches(self, filter_prefix=None):
         model_sd = self.model_state_dict()
@@ -581,49 +556,101 @@ class ModelPatcher:
         return p
 
     def model_state_dict(self, filter_prefix=None):
-        with self.use_ejected():
-            sd = self.model.state_dict()
-            keys = list(sd.keys())
-            if filter_prefix is not None:
-                for k in keys:
-                    if not k.startswith(filter_prefix):
-                        sd.pop(k)
-            return sd
+        sd = self.model.state_dict()
+        keys = list(sd.keys())
+        if filter_prefix is not None:
+            for k in keys:
+                if not k.startswith(filter_prefix):
+                    sd.pop(k)
+        return sd
+    
+    def restore_original_model(self):
+        if hasattr(self.model, '_orig_mod'):
+            patch_keys = list(self.object_patches_backup.keys())
+            for k in patch_keys:
+                ldm_patched.modules.utils.set_attr(self.model._orig_mod, k, self.object_patches_backup[k])
+        else:
+            patch_keys = list(self.object_patches_backup.keys())
+            for k in patch_keys:
+                ldm_patched.modules.utils.set_attr(self.model, k, self.object_patches_backup[k])
+        return patch_keys
 
-    def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
+    def recompile_model(self, patch_keys=None):
+        if not hasattr(self.model, "compile_settings"):
+            return
+
+        compile_settings = self.model.compile_settings
+        if patch_keys:
+            for k in patch_keys:
+                if "diffusion_model." in k:
+                    key = k.replace('diffusion_model.', '')
+                    attributes = key.split('.')
+                    if hasattr(self.model, '_orig_mod'):
+                        block = self.model._orig_mod
+                    else:
+                        block = self.model
+
+                    for attr in attributes:
+                        if attr.isdigit():
+                            block = block[int(attr)]
+                        else:
+                            block = getattr(block, attr)
+
+                    # Compile the block
+                    compiled_block = torch.compile(
+                        block,
+                        mode=compile_settings["mode"],
+                        fullgraph=compile_settings.get("fullgraph", False),
+                        dynamic=compile_settings.get("dynamic", False),
+                        backend=compile_settings["backend"]
+                    )
+                    self.add_object_patch(k, compiled_block)
+
+    def patch_weight_to_device(self, key, device_to=None):
         if key not in self.patches:
             return
 
-        inplace_update = self.weight_inplace_update or inplace_update
-
-        # Handle keys with _orig_mod
-        if key.startswith('diffusion_model._orig_mod.'):
-            model_key = key[len('diffusion_model._orig_mod.'):]
-            actual_model = self.model.diffusion_model._orig_mod if hasattr(self.model, 'diffusion_model') else self.model._orig_mod
+        if hasattr(self.model, '_orig_mod'):
+            weight = ldm_patched.modules.utils.get_attr(self.model._orig_mod, key)
         else:
-            model_key = key
-            actual_model = self.model
+            weight = ldm_patched.modules.utils.get_attr(self.model, key)
 
-        weight = ldm_patched.modules.utils.get_attr(actual_model, model_key)
-
+        inplace_update = self.weight_inplace_update
         if key not in self.backup:
-            # Store a copy of the weight tensor
-            weight_copy = weight.to(device=self.offload_device, copy=inplace_update)
-            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(
-                weight_copy, inplace_update)
+            self.backup[key] = weight.to(device=self.offload_device, copy=inplace_update)
 
         if device_to is not None:
             temp_weight = ldm_patched.modules.model_management.cast_to_device(weight, device_to, torch.float32, copy=True)
         else:
             temp_weight = weight.to(torch.float32, copy=True)
 
-        out_weight = ldm_patched.modules.lora.calculate_weight(self.patches[key], temp_weight, key)
-        out_weight = ldm_patched.float.stochastic_rounding(out_weight, weight.dtype, seed=string_to_seed(key))
+        out_weight = self.calculate_weight(self.patches[key], temp_weight, key).to(weight.dtype)
 
         if inplace_update:
-            ldm_patched.modules.utils.copy_to_param(actual_model, model_key, out_weight)
+            if hasattr(self.model, '_orig_mod'):
+                ldm_patched.modules.utils.copy_to_param(self.model._orig_mod, key, out_weight)
+            else:
+                ldm_patched.modules.utils.copy_to_param(self.model, key, out_weight)
         else:
-            ldm_patched.modules.utils.set_attr_param(actual_model, model_key, out_weight)
+            if hasattr(self.model, '_orig_mod'):
+                ldm_patched.modules.utils.set_attr_param(self.model._orig_mod, key, out_weight)
+            else:
+                ldm_patched.modules.utils.set_attr_param(self.model, key, out_weight)
+
+    def patch_model(self, device_to=None, patch_weights=True):
+        # First restore original model if needed
+        patch_keys = self.restore_original_model()
+
+        for k in self.object_patches:
+            old = ldm_patched.modules.utils.set_attr(self.model, k, self.object_patches[k])
+            if k not in self.object_patches_backup:
+                self.object_patches_backup[k] = old
+
+        if patch_weights:
+            if hasattr(self.model, '_orig_mod'):
+                ldm_patched.modules.utils.set_attr_param(self.model._orig_mod, key, out_weight)
+            else:
+                ldm_patched.modules.utils.set_attr_param(self.model, key, out_weight)
 
     def _load_list(self):
         loading = []
@@ -768,24 +795,12 @@ class ModelPatcher:
 
             keys = list(self.backup.keys())
 
-            for k in keys:
-                bk = self.backup[k]
-                weight = bk.weight if hasattr(bk, 'weight') else bk
-
-                # Handle _orig_mod prefix cases
-                if k.startswith('diffusion_model._orig_mod.'):
-                    model_key = k[len('diffusion_model._orig_mod.'):]
-                    actual_model = self.model.diffusion_model._orig_mod if hasattr(self.model.diffusion_model, '_orig_mod') else self.model.diffusion_model
-                    if bk.inplace_update:
-                        ldm_patched.modules.utils.copy_to_param(actual_model, model_key, weight)
-                    else:
-                        ldm_patched.modules.utils.set_attr_param(actual_model, model_key, weight)
-                # Handle normal keys
-                else:
-                    if bk.inplace_update:
-                        ldm_patched.modules.utils.copy_to_param(self.model, k, weight)
-                    else:
-                        ldm_patched.modules.utils.set_attr_param(self.model, k, weight)
+            if self.weight_inplace_update:
+                for k in keys:
+                    ldm_patched.modules.utils.copy_to_param(self.model, k, self.backup[k])
+            else:
+                for k in keys:
+                    ldm_patched.modules.utils.set_attr_param(self.model, k, self.backup[k])
 
             self.model.current_weight_patches_uuid = None
             self.backup.clear()

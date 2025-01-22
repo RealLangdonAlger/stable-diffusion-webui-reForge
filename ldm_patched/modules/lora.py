@@ -273,63 +273,38 @@ def model_lora_keys_clip(model, key_map={}):
     return key_map
 
 def model_lora_keys_unet(model, key_map={}):
-    print("Mapping LoRA keys for model type:", type(model).__name__)
-    
-    # Get original model and config
-    if hasattr(model, '_orig_mod'):
-        logging.debug("Using _orig_mod for LoRA key mapping")
-        model = model._orig_mod
-    
-    # Get model config considering compilation
-    try:
-        if hasattr(model, 'model_config'):
-            model_config = model.model_config
-        elif hasattr(model, '_orig_mod') and hasattr(model._orig_mod, 'model_config'):
-            model_config = model._orig_mod.model_config
-        else:
-            # If we can't get config, proceed with just the state dict mapping
-            model_config = None
-    except AttributeError:
-        model_config = None
-    
-    sd = model.state_dict()
-    sdk = sd.keys()
-    # print(f"First few model keys: {list(sdk)[:5]}")
+    """
+    Maps LoRA keys to model keys, handling both compiled and non-compiled models.
+    """
+    # Get original model if compiled
+    actual_model = model._orig_mod if hasattr(model, '_orig_mod') else model
 
-    # Handle _orig_mod cases
-    for k in sdk:
-        working_key = k
-        prefixed_key = k
-        
-        # Strip prefixes for mapping but keep original key
-        if k.startswith('diffusion_model._orig_mod.'):
-            working_key = k[len('diffusion_model._orig_mod.'):]
-        elif k.startswith('_orig_mod.'):
-            working_key = k[len('_orig_mod.'):]
-        
-        # Handle both direct key and diffusion_model prefixed key
-        direct_key = working_key
-        prefixed_key = f"diffusion_model.{working_key}"
-        
-        if working_key.endswith(".weight"):
-            # Map without diffusion_model prefix
-            base_key = direct_key[:-len(".weight")]
-            key_lora = base_key.replace(".", "_")
-            key_map[f"lora_unet_{key_lora}"] = orig_key
-            key_map[base_key] = orig_key
-            
-            # Map with diffusion_model prefix
-            base_key = prefixed_key[:-len(".weight")]
-            key_map[base_key] = orig_key
-            
-            # Extra mapping for possible variations
-            key_map[direct_key] = orig_key
-            key_map[prefixed_key] = orig_key
-        else:
-            key_map[direct_key] = orig_key
-            key_map[prefixed_key] = orig_key
+    # Get state dict and handle _orig_mod prefix
+    model_sd = actual_model.state_dict()
 
-    # print(f"First few mapped LoRA keys: {list(key_map.keys())[:5]}")
+    for k in model_sd:
+        if k.startswith("diffusion_model.") and k.endswith(".weight"):
+            key_lora = k[len("diffusion_model."):-len(".weight")].replace(".", "_")
+            key_map[f"lora_unet_{key_lora}"] = k
+            key_map[f"lora_prior_unet_{key_lora}"] = k
+
+    # Map diffusers-style keys
+    diffusers_keys = ldm_patched.modules.utils.unet_to_diffusers(actual_model.model_config.unet_config)
+    for k in diffusers_keys:
+        if k.endswith(".weight"):
+            unet_key = f"diffusion_model.{diffusers_keys[k]}"
+            if unet_key in model_sd:
+                # Handle both original and diffusers-style LoRA keys
+                key_lora = k[:-len(".weight")].replace(".", "_")
+                key_map[f"lora_unet_{key_lora}"] = unet_key
+                
+                diffusers_lora_prefix = ["", "unet."]
+                for p in diffusers_lora_prefix:
+                    diffusers_lora_key = f"{p}{k[:-len('.weight')].replace('.to_', '.processor.to_')}"
+                    if diffusers_lora_key.endswith(".to_out.0"):
+                        diffusers_lora_key = diffusers_lora_key[:-2]
+                    key_map[diffusers_lora_key] = unet_key
+
     return key_map
 
 

@@ -5,7 +5,6 @@ from ldm_patched.modules.model_patcher import ModelPatcher
 from ldm_patched.modules.sampler_helpers import convert_cond
 from ldm_patched.modules.samplers import encode_model_conds
 from ldm_patched.modules.args_parser import args
-import uuid
 
 
 class UnetPatcher(ModelPatcher):
@@ -34,59 +33,6 @@ class UnetPatcher(ModelPatcher):
         n.compiled = self.compiled
         n.parent = self
         return n
-
-    def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
-        model_sd = self.model.state_dict()
-        p = set()
-        
-        # Create mapping for keys with and without prefixes
-        key_mapping = {}
-        state_keys = list(model_sd.keys())
-        
-        for k in state_keys:
-            # Handle diffusion_model._orig_mod prefix
-            if k.startswith('diffusion_model._orig_mod.'):
-                raw_key = k[len('diffusion_model._orig_mod.'):]
-                mapped_key = f"diffusion_model.{raw_key}"
-                key_mapping[mapped_key] = k
-                key_mapping[raw_key] = k
-            # Handle _orig_mod prefix
-            elif k.startswith('_orig_mod.'):
-                raw_key = k[len('_orig_mod.'):]
-                mapped_key = f"diffusion_model.{raw_key}"
-                key_mapping[mapped_key] = k
-                key_mapping[raw_key] = k
-            # No prefix
-            else:
-                mapped_key = f"diffusion_model.{k}"
-                key_mapping[mapped_key] = k
-                key_mapping[k] = k
-
-        for k in patches:
-            offset = None
-            function = None
-            if isinstance(k, str):
-                key = k
-            else:
-                offset = k[1]
-                key = k[0]
-                if len(k) > 2:
-                    function = k[2]
-
-            # Try to find the key in our mapping
-            actual_key = key_mapping.get(key)
-            if actual_key is not None and actual_key in model_sd:
-                p.add(k)
-                current_patches = self.patches.get(actual_key, [])
-                current_patches.append((strength_patch, patches[k], strength_model, offset, function))
-                self.patches[actual_key] = current_patches
-                # print(f"Successfully applied patch for key: {key} -> {actual_key}")
-            else:
-                # print(f"Failed to find matching key in model: {key}")
-                pass
-
-        self.patches_uuid = uuid.uuid4()
-        return list(p)
 
     def add_extra_preserved_memory_during_sampling(self, memory_in_bytes: int):
         # Use this to ask Forge to preserve a certain amount of memory during sampling.

@@ -76,21 +76,19 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, filen
 
     # Restore original model state before applying LoRA
     if model is not None:
-        # Get the actual model depending on compilation state
-        if hasattr(model.model, 'diffusion_model'):
-            target_model = model.model.diffusion_model
-            if hasattr(target_model, '_orig_mod'):
-                target_model = target_model._orig_mod
+        patch_keys = list(model.object_patches_backup.keys())
+        for k in patch_keys:
+            ldm_patched.modules.utils.set_attr(model.model, k, model.object_patches_backup[k])
+    
+    # Get LoRA key mappings, using _orig_mod if available
+    if model is not None:
+        if hasattr(model.model, '_orig_mod'):
+            unet_keys = ldm_patched.modules.lora.model_lora_keys_unet(model.model._orig_mod)
         else:
-            target_model = model.model
-            if hasattr(target_model, '_orig_mod'):
-                target_model = target_model._orig_mod
-        
-        unet_keys = ldm_patched.modules.lora.model_lora_keys_unet(target_model)
-        # print(f"Generated UNet keys: {list(unet_keys.keys())[:5]}")
+            unet_keys = ldm_patched.modules.lora.model_lora_keys_unet(model.model)
     else:
         unet_keys = {}
-
+        
     clip_keys = ldm_patched.modules.lora.model_lora_keys_clip(clip.cond_stage_model) if clip is not None else {}
 
     # Load and match LoRA weights
@@ -103,7 +101,7 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, filen
         return model, clip
 
     if len(lora_unmatch) > 0:
-        print(f'[LORA] Loading {filename} with unmatched keys {list(lora_unmatch.keys())}')
+        print(f'[LORA] Loading {filename} for {model_flag} with unmatched keys {list(lora_unmatch.keys())}')
 
     # Clone and apply patches
     new_model = model.clone() if model is not None else None
@@ -113,22 +111,48 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, filen
         loaded_keys = new_model.add_patches(lora_unet, strength_model)
         skipped_keys = [item for item in lora_unet if item not in loaded_keys]
         if len(skipped_keys) > 12:
-            print(f'[LORA] Mismatch {filename} with {len(skipped_keys)} keys mismatched in {len(loaded_keys)} keys')
-            # Add debug info
-            print(f'First few skipped keys: {skipped_keys[:5]}')
-            print(f'Available model keys: {list(unet_keys.keys())[:5]}')
+            print(f'[LORA] Mismatch {filename} for {model_flag}-UNet with {len(skipped_keys)} keys mismatched in {len(loaded_keys)} keys')
         else:
-            print(f'[LORA] Loaded {filename} with {len(loaded_keys)} keys at weight {strength_model} (skipped {len(skipped_keys)} keys)')
+            print(f'[LORA] Loaded {filename} for {model_flag}-UNet with {len(loaded_keys)} keys at weight {strength_model} (skipped {len(skipped_keys)} keys)')
             model = new_model
 
     if new_clip is not None and len(lora_clip) > 0:
         loaded_keys = new_clip.add_patches(lora_clip, strength_clip)
         skipped_keys = [item for item in lora_clip if item not in loaded_keys]
         if len(skipped_keys) > 12:
-            print(f'[LORA] Mismatch {filename} for CLIP with {len(skipped_keys)} keys mismatched in {len(loaded_keys)} keys')
+            print(f'[LORA] Mismatch {filename} for {model_flag}-CLIP with {len(skipped_keys)} keys mismatched in {len(loaded_keys)} keys')
         else:
-            print(f'[LORA] Loaded {filename} with {len(loaded_keys)} keys at weight {strength_clip} (skipped {len(skipped_keys)} keys)')
+            print(f'[LORA] Loaded {filename} for {model_flag}-CLIP with {len(loaded_keys)} keys at weight {strength_clip} (skipped {len(skipped_keys)} keys)')
             clip = new_clip
+
+    # Recompile object patches if model was compiled
+    if model is not None and patch_keys:
+        if hasattr(model.model, "compile_settings"):
+            compile_settings = getattr(model.model, "compile_settings")
+            for k in patch_keys:
+                if "diffusion_model." in k:
+                    # Get the actual block by following the attribute path
+                    key = k.replace('diffusion_model.', '')
+                    attributes = key.split('.')
+                    block = model.get_model_object("diffusion_model")
+                    if hasattr(block, '_orig_mod'):
+                        block = block._orig_mod
+                    
+                    for attr in attributes:
+                        if attr.isdigit():
+                            block = block[int(attr)]
+                        else:
+                            block = getattr(block, attr)
+                    
+                    # Recompile the block with same settings
+                    compiled_block = torch.compile(
+                        block, 
+                        mode=compile_settings["mode"],
+                        fullgraph=compile_settings.get("fullgraph", False),
+                        dynamic=compile_settings.get("dynamic", False),
+                        backend=compile_settings["backend"]
+                    )
+                    model.add_object_patch(k, compiled_block)
 
     return model, clip
 
