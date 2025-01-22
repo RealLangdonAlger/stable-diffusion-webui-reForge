@@ -185,6 +185,7 @@ def compile_model(unet, backend="inductor"):
         import torch._dynamo as dynamo
         dynamo.config.suppress_errors = True
         dynamo.config.verbose = True
+        dynamo.config.cache_size_limit = 32  # Increase cache size
         
         # Get the actual model to compile
         if hasattr(unet.model, 'diffusion_model'):
@@ -193,12 +194,16 @@ def compile_model(unet, backend="inductor"):
             real_model = unet.model
         
         # Store settings before compilation
-        compile_settings = {}
+        base_settings = {
+            "backend": backend,
+            "fullgraph": False,
+            "dynamic": True,  # Enable dynamic shapes support
+        }
+        
         if args.torch_compile_mode == "max-autotune":
             compile_settings = {
-                "backend": backend,
+                **base_settings,
                 "mode": None,
-                "fullgraph": False,
                 "options": {
                     "max_autotune": True,
                     "max_autotune_gemm": True,
@@ -207,14 +212,17 @@ def compile_model(unet, backend="inductor"):
                     "trace.graph_diagram": True,
                     "epilogue_fusion": True,
                     "layout_optimization": True,
-                    "aggressive_fusion": True
+                    "aggressive_fusion": True,
+                    "shape_padding": True,  # Enable shape padding for better dynamic shape handling
                 }
             }
         else:
             compile_settings = {
-                "backend": backend,
+                **base_settings,
                 "mode": args.torch_compile_mode,
-                "fullgraph": False
+                "options": {
+                    "shape_padding": True,  # Enable shape padding for better dynamic shape handling
+                }
             }
 
         # Store settings for later recompilation if needed
@@ -226,7 +234,7 @@ def compile_model(unet, backend="inductor"):
                 unet.model.diffusion_model = compiled_model
             else:
                 unet.model = compiled_model
-            print("Model compilation successful")
+            print("Model compilation successful with dynamic shapes support")
             return True
         except Exception as e:
             print(f"Warning: torch.compile failed with error: {str(e)}")
