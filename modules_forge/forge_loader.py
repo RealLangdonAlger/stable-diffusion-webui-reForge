@@ -173,73 +173,49 @@ def compile_model(unet, backend="inductor"):
     if not hasattr(torch, 'compile'):
         print("torch.compile not available - requires PyTorch 2.0 or newer")
         return
-    
+
     try:
         torch_version = torch.__version__.split('.')
         if int(torch_version[0]) < 2:
             print(f"torch.compile requires PyTorch 2.0 or newer. Current version: {torch.__version__}")
             return
 
+        print(f"Compiling model using torch.compile with backend: {backend} and mode: {args.torch_compile_mode}")
+        
         import torch._dynamo as dynamo
         dynamo.config.suppress_errors = True
         dynamo.config.verbose = True
-        dynamo.config.cache_size_limit = 32
-
+        
         # Get the actual model to compile
         if hasattr(unet.model, 'diffusion_model'):
             real_model = unet.model.diffusion_model
         else:
             real_model = unet.model
-
-        # Check if any individual options are enabled
-        has_custom_options = any([
-            args.torch_compile_epilogue_fusion,
-            args.torch_compile_max_autotune,
-            args.torch_compile_fallback_random,
-            args.torch_compile_shape_padding,
-            args.torch_compile_cudagraphs,
-            args.torch_compile_trace,
-            args.torch_compile_graph_diagram
-        ])
-
-        if backend == "cudagraphs":
-            # Simplified settings for cudagraphs
+        
+        # Store settings before compilation
+        compile_settings = {}
+        if args.torch_compile_mode == "max-autotune":
             compile_settings = {
                 "backend": backend,
-                "fullgraph": True,
-                "dynamic": True,
-            }
-        else:  # inductor and other backends
-            compile_settings = {
-                "backend": backend,
+                "mode": None,
                 "fullgraph": False,
-                "dynamic": True,
+                "options": {
+                    "max_autotune": True,
+                    "max_autotune_gemm": True,
+                    "max_autotune_pointwise": True,
+                    "trace.enabled": True,
+                    "trace.graph_diagram": True,
+                    "epilogue_fusion": True,
+                    "layout_optimization": True,
+                    "aggressive_fusion": True
+                }
             }
-
-            if has_custom_options:
-                # If any custom options are specified, use options instead of mode
-                options = {}
-                if args.torch_compile_epilogue_fusion:
-                    options["epilogue_fusion"] = True
-                if args.torch_compile_max_autotune:
-                    options["max_autotune"] = True
-                if args.torch_compile_fallback_random:
-                    options["fallback_random"] = True
-                if args.torch_compile_shape_padding:
-                    options["shape_padding"] = True
-                if args.torch_compile_cudagraphs:
-                    options["triton.cudagraphs"] = True
-                if args.torch_compile_trace:
-                    options["trace.enabled"] = True
-                if args.torch_compile_graph_diagram:
-                    options["trace.graph_diagram"] = True
-
-                compile_settings["options"] = options
-            else:
-                # If no custom options, use the selected mode
-                compile_settings["mode"] = args.torch_compile_mode
-
-        print(f"Compiling model using torch.compile with settings: {compile_settings}")
+        else:
+            compile_settings = {
+                "backend": backend,
+                "mode": args.torch_compile_mode,
+                "fullgraph": False
+            }
 
         # Store settings for later recompilation if needed
         real_model.compile_settings = compile_settings
@@ -250,12 +226,13 @@ def compile_model(unet, backend="inductor"):
                 unet.model.diffusion_model = compiled_model
             else:
                 unet.model = compiled_model
-            print("Model compilation successful with dynamic shapes support")
+            print("Model compilation successful")
             return True
         except Exception as e:
             print(f"Warning: torch.compile failed with error: {str(e)}")
             print("Falling back to uncompiled model")
             return False
+            
     except Exception as e:
         print(f"Error during model compilation: {str(e)}")
         return False
