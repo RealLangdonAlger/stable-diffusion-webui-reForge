@@ -283,39 +283,61 @@ def model_lora_keys_unet(model, key_map={}):
     
     sd = model.state_dict()
     sdk = sd.keys()
-    
-    # Create a mapping to handle _orig_mod prefix
-    orig_mod_prefix = '_orig_mod.' if any(k.startswith('_orig_mod.') for k in sdk) else ''
+    logging.debug(f"First few model keys: {list(sdk)[:5]}")
+
+    # Handle both diffusion_model._orig_mod and plain _orig_mod cases
+    needs_diffusion_prefix = not any(k.startswith("diffusion_model.") for k in sdk)
     
     for k in sdk:
-        # Remove _orig_mod prefix if present
-        if k.startswith('_orig_mod.'):
-            k = k[len('_orig_mod.'):]
-            
-        if k.startswith("diffusion_model."):
-            if k.endswith(".weight"):
-                key_lora = k[len("diffusion_model."):-len(".weight")].replace(".", "_")
-                # Map both with and without _orig_mod prefix
-                key_map["lora_unet_{}".format(key_lora)] = f"{orig_mod_prefix}{k}"
-                key_map["{}".format(k[:-len(".weight")])] = f"{orig_mod_prefix}{k}"
+        working_key = k
+        prefixed_key = k
+        
+        # Handle various prefix cases
+        if k.startswith('diffusion_model._orig_mod.'):
+            working_key = k[len('diffusion_model._orig_mod.'):]
+            prefixed_key = f"diffusion_model.{working_key}"
+        elif k.startswith('_orig_mod.'):
+            working_key = k[len('_orig_mod.'):]
+            prefixed_key = f"diffusion_model.{working_key}" if needs_diffusion_prefix else working_key
+        elif needs_diffusion_prefix:
+            prefixed_key = f"diffusion_model.{k}"
+
+        if prefixed_key.startswith("diffusion_model."):
+            if prefixed_key.endswith(".weight"):
+                key_lora = prefixed_key[len("diffusion_model."):-len(".weight")].replace(".", "_")
+                key_map["lora_unet_{}".format(key_lora)] = k
+                key_map["{}".format(prefixed_key[:-len(".weight")])] = k
                 logging.debug(f"Mapped key {k} to lora_unet_{key_lora}")
             else:
-                key_map["{}".format(k)] = f"{orig_mod_prefix}{k}"
+                key_map["{}".format(prefixed_key)] = k
 
+    # Handle diffusers format
     diffusers_keys = ldm_patched.modules.utils.unet_to_diffusers(model.model_config.unet_config)
     for k in diffusers_keys:
         if k.endswith(".weight"):
             unet_key = "diffusion_model.{}".format(diffusers_keys[k])
+            # Map the diffusers key back to our actual state dict key
+            if unet_key in key_map:
+                actual_key = key_map[unet_key]
+            else:
+                # Try with _orig_mod prefix variations
+                test_keys = [
+                    f"diffusion_model._orig_mod.{diffusers_keys[k]}",
+                    f"_orig_mod.{diffusers_keys[k]}",
+                    diffusers_keys[k]
+                ]
+                actual_key = next((tk for tk in test_keys if tk in sd), unet_key)
+
             key_lora = k[:-len(".weight")].replace(".", "_")
-            key_map["lora_unet_{}".format(key_lora)] = unet_key
-            key_map["lycoris_{}".format(key_lora)] = unet_key #simpletuner lycoris format
+            key_map["lora_unet_{}".format(key_lora)] = actual_key
+            key_map["lycoris_{}".format(key_lora)] = actual_key
 
             diffusers_lora_prefix = ["", "unet."]
             for p in diffusers_lora_prefix:
                 diffusers_lora_key = "{}{}".format(p, k[:-len(".weight")].replace(".to_", ".processor.to_"))
                 if diffusers_lora_key.endswith(".to_out.0"):
                     diffusers_lora_key = diffusers_lora_key[:-2]
-                key_map[diffusers_lora_key] = unet_key
+                key_map[diffusers_lora_key] = actual_key
 
     if isinstance(model, ldm_patched.modules.model_base.SD3): #Diffusers lora SD3
         diffusers_keys = ldm_patched.modules.utils.mmdit_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")
