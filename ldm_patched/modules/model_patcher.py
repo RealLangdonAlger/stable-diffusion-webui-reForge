@@ -514,8 +514,8 @@ class ModelPatcher:
                 else:
                     logging.debug(f"Failed to find matching key in model: {key} (tried {actual_key})")
 
-        self.patches_uuid = uuid.uuid4()
-        return list(p)
+            self.patches_uuid = uuid.uuid4()
+            return list(p)
 
     def get_key_patches(self, filter_prefix=None):
         model_sd = self.model_state_dict()
@@ -550,7 +550,7 @@ class ModelPatcher:
                         sd.pop(k)
             return sd
 
-    def patch_weight_to_device(self, key, device_to=None):
+    def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
         if key not in self.patches:
             return
         
