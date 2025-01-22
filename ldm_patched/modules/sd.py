@@ -75,62 +75,77 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, filen
         model_flag = 'default'
 
     # Restore original model state before applying LoRA
-    if model is not None:
-        # Get the actual model depending on compilation state
-        if hasattr(model.model, 'diffusion_model'):
-            target_model = model.model.diffusion_model
-            if hasattr(target_model, '_orig_mod'):
-                target_model = target_model._orig_mod
+    if model is not None and hasattr(model, 'object_patches_backup'):
+        patch_keys = list(model.object_patches_backup.keys())
+        for k in patch_keys:
+            ldm_patched.modules.utils.set_attr(model.model, k, model.object_patches_backup[k])
+
+    # Only build key maps for components we'll actually use
+    key_map = {}
+    if model is not None and strength_model != 0:
+        if hasattr(model.model, '_orig_mod'):
+            key_map = ldm_patched.modules.lora.model_lora_keys_unet(model.model._orig_mod, key_map)
         else:
-            target_model = model.model
-            if hasattr(target_model, '_orig_mod'):
-                target_model = target_model._orig_mod
-        
-        unet_keys = ldm_patched.modules.lora.model_lora_keys_unet(target_model)
-        # print(f"Generated UNet keys: {list(unet_keys.keys())[:5]}")
+            key_map = ldm_patched.modules.lora.model_lora_keys_unet(model.model, key_map)
+    if clip is not None and strength_clip != 0:
+        key_map = ldm_patched.modules.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
+
+    # If we have no keys to process, return early
+    if not key_map:
+        return (model, clip)
+
+    # Load LoRA weights
+    loaded = ldm_patched.modules.lora.load_lora(lora, key_map)
+
+    # Only clone and patch if we have relevant weights
+    if model is not None and strength_model != 0:
+        new_modelpatcher = model.clone()
+        loaded_keys_unet = new_modelpatcher.add_patches(loaded, strength_model)
     else:
-        unet_keys = {}
+        new_modelpatcher = model
+        loaded_keys_unet = set()
 
-    clip_keys = ldm_patched.modules.lora.model_lora_keys_clip(clip.cond_stage_model) if clip is not None else {}
+    if clip is not None and strength_clip != 0:
+        new_clip = clip.clone()
+        loaded_keys_clip = new_clip.add_patches(loaded, strength_clip)
+    else:
+        new_clip = clip
+        loaded_keys_clip = set()
 
-    # Load and match LoRA weights
-    lora_unmatch = lora
-    lora_unet, lora_unmatch = ldm_patched.modules.lora.load_lora(lora_unmatch, unet_keys)
-    lora_clip, lora_unmatch = ldm_patched.modules.lora.load_lora(lora_unmatch, clip_keys)
+    # Only log if we actually loaded something
+    if loaded_keys_unet or loaded_keys_clip:
+        total_loaded_keys = len(loaded_keys_unet) + len(loaded_keys_clip)
+        print(f'[LORA] Loaded {filename} for {model_flag} with {total_loaded_keys} keys (UNet: {len(loaded_keys_unet)}, CLIP: {len(loaded_keys_clip)}) at weight {strength_clip}')
 
-    if len(lora_unmatch) > 12:
-        print(f'[LORA] LoRA version mismatch for {model_flag}: {filename}')
-        return model, clip
+    # Recompile object patches if model was compiled
+    if model is not None and hasattr(model, 'object_patches_backup'):
+        patch_keys = list(model.object_patches_backup.keys())
+        if hasattr(new_modelpatcher.model, "compile_settings"):
+            compile_settings = getattr(new_modelpatcher.model, "compile_settings")
+            for k in patch_keys:
+                if "diffusion_model." in k:
+                    # Get the actual block by following the attribute path
+                    key = k.replace('diffusion_model.', '')
+                    attributes = key.split('.')
+                    block = new_modelpatcher.get_model_object("diffusion_model")
+                    if hasattr(block, '_orig_mod'):
+                        block = block._orig_mod
+                    for attr in attributes:
+                        if attr.isdigit():
+                            block = block[int(attr)]
+                        else:
+                            block = getattr(block, attr)
+                    # Recompile the block with same settings
+                    compiled_block = torch.compile(
+                        block,
+                        mode=compile_settings["mode"],
+                        fullgraph=compile_settings.get("fullgraph", False),
+                        dynamic=compile_settings.get("dynamic", False),
+                        backend=compile_settings["backend"]
+                    )
+                    new_modelpatcher.add_object_patch(k, compiled_block)
 
-    if len(lora_unmatch) > 0:
-        print(f'[LORA] Loading {filename} with unmatched keys {list(lora_unmatch.keys())}')
-
-    # Clone and apply patches
-    new_model = model.clone() if model is not None else None
-    new_clip = clip.clone() if clip is not None else None
-
-    if new_model is not None and len(lora_unet) > 0:
-        loaded_keys = new_model.add_patches(lora_unet, strength_model)
-        skipped_keys = [item for item in lora_unet if item not in loaded_keys]
-        if len(skipped_keys) > 12:
-            print(f'[LORA] Mismatch {filename} with {len(skipped_keys)} keys mismatched in {len(loaded_keys)} keys')
-            # Add debug info
-            print(f'First few skipped keys: {skipped_keys[:5]}')
-            print(f'Available model keys: {list(unet_keys.keys())[:5]}')
-        else:
-            print(f'[LORA] Loaded {filename} with {len(loaded_keys)} keys at weight {strength_model} (skipped {len(skipped_keys)} keys)')
-            model = new_model
-
-    if new_clip is not None and len(lora_clip) > 0:
-        loaded_keys = new_clip.add_patches(lora_clip, strength_clip)
-        skipped_keys = [item for item in lora_clip if item not in loaded_keys]
-        if len(skipped_keys) > 12:
-            print(f'[LORA] Mismatch {filename} for CLIP with {len(skipped_keys)} keys mismatched in {len(loaded_keys)} keys')
-        else:
-            print(f'[LORA] Loaded {filename} with {len(loaded_keys)} keys at weight {strength_clip} (skipped {len(skipped_keys)} keys)')
-            clip = new_clip
-
-    return model, clip
+    return (new_modelpatcher, new_clip)
 
 
 class CLIP:
