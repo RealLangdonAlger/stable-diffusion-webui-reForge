@@ -193,37 +193,47 @@ def compile_model(unet, backend="inductor"):
         else:
             real_model = unet.model
         
-        # Store settings before compilation
-        base_settings = {
-            "backend": backend,
-            "fullgraph": False,
-            "dynamic": True,  # Enable dynamic shapes support
-        }
-        
-        if args.torch_compile_mode == "max-autotune":
+        # Configure settings based on backend
+        if backend == "cudagraphs":
+            # cudagraphs requires mode without options
             compile_settings = {
-                **base_settings,
-                "mode": None,
-                "options": {
-                    "max_autotune": True,
-                    "max_autotune_gemm": True,
-                    "max_autotune_pointwise": True,
-                    "trace.enabled": True,
-                    "trace.graph_diagram": True,
-                    "epilogue_fusion": True,
-                    "layout_optimization": True,
-                    "aggressive_fusion": True,
-                    "shape_padding": True,  # Enable shape padding for better dynamic shape handling
-                }
+                "backend": backend,
+                "mode": args.torch_compile_mode,
+                "fullgraph": True,  # cudagraphs works better with full graph
+                "dynamic": True,    # Still enable dynamic shapes
             }
         else:
-            compile_settings = {
-                **base_settings,
-                "mode": args.torch_compile_mode,
-                "options": {
-                    "shape_padding": True,  # Enable shape padding for better dynamic shape handling
-                }
+            # Other backends (inductor etc)
+            base_settings = {
+                "backend": backend,
+                "fullgraph": False,
+                "dynamic": True,
             }
+            
+            if args.torch_compile_mode == "max-autotune":
+                compile_settings = {
+                    **base_settings,
+                    "mode": None,
+                    "options": {
+                        "max_autotune": True,
+                        "max_autotune_gemm": True,
+                        "max_autotune_pointwise": True,
+                        "trace.enabled": True,
+                        "trace.graph_diagram": True,
+                        "epilogue_fusion": True,
+                        "layout_optimization": True,
+                        "aggressive_fusion": True,
+                        "shape_padding": True,
+                    }
+                }
+            else:
+                compile_settings = {
+                    **base_settings,
+                    "mode": args.torch_compile_mode,
+                    "options": {
+                        "shape_padding": True,
+                    }
+                }
 
         # Store settings for later recompilation if needed
         real_model.compile_settings = compile_settings
