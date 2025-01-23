@@ -1,3 +1,7 @@
+# Original code from Comfy, https://github.com/comfyanonymous/ComfyUI
+
+
+
 import torch
 from ldm_patched.ldm.modules.attention import optimized_attention_for_device
 import ldm_patched.modules.ops

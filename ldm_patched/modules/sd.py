@@ -1,4 +1,5 @@
 from __future__ import annotations
+# Original code from Comfy, https://github.com/comfyanonymous/ComfyUI
 import torch
 from enum import Enum
 import logging
