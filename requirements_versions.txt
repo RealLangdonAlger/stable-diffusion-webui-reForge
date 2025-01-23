@@ -35,7 +35,7 @@ httpx==0.24.1
 pillow-avif-plugin==1.4.3
 albumentations==1.4.3
 pydantic==1.10.15
-diffusers==0.30.0
+diffusers==0.32.2
 cachetools==5.3.2
 colorama==0.4.6
 huggingface_hub==0.25.0
