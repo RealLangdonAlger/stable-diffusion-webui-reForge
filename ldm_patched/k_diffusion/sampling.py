@@ -222,9 +222,10 @@ def to_d(x, sigma, denoised):
     return (x - denoised) / append_dims(sigma, x.ndim)
 
 
-def get_ancestral_step(sigma_from, sigma_to, eta=1.):
+def get_ancestral_step(sigma_from, sigma_to, eta=None):
     """Calculates the noise level (sigma_down) to step down to and the amount
     of noise to add (sigma_up) when doing an ancestral sampling step."""
+    eta = eta if eta is not None else opts.ancestral_eta
     if not eta:
         return sigma_to, 0.
     sigma_up = min(sigma_to, eta * (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5)
