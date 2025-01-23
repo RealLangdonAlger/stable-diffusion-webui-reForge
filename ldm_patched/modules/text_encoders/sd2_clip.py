@@ -1,4 +1,6 @@
-# Taken from https://github.com/comfyanonymous/ComfyUI
+# Original code from Comfy, https://github.com/comfyanonymous/ComfyUI
+
+
 
 from ldm_patched.modules import sd1_clip
 import os

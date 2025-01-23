@@ -1,4 +1,6 @@
+# Original code from Comfy, https://github.com/comfyanonymous/ComfyUI
 import torch
+
 
 class LatentFormat:
     scale_factor = 1.0
