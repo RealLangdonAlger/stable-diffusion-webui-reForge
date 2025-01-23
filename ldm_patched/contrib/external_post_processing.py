@@ -1,3 +1,7 @@
+# Original code from Comfy, https://github.com/comfyanonymous/ComfyUI
+
+
+
 import numpy as np
 import torch
 import torch.nn.functional as F
