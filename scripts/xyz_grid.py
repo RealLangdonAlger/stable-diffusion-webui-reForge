@@ -348,10 +348,9 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
 
         state.job = f"{index(ix, iy, iz) + 1} out of {list_size}"
 
-        processed: Processed = cell(x, y, z, ix, iy, iz)
+        processed = cell(x, y, z, ix, iy, iz)
 
         if processed_result is None:
-            # Use our first processed result object as a template container to hold our full results
             processed_result = copy(processed)
             processed_result.images = [None] * list_size
             processed_result.all_prompts = [None] * list_size
@@ -361,16 +360,20 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
 
         idx = index(ix, iy, iz)
         if processed.images:
-            # Non-empty list indicates some degree of success.
-            process_image = processed.images[0]  # Store reference to image
+            if opts.grid_save and include_lone_images:
+                images.save_image(
+                    processed.images[0],
+                    p.outpath_grids,
+                    f"xyz_individual_x{ix}_y{iy}_z{iz}",
+                    info=processed.infotexts[0],
+                    extension=opts.grid_format,
+                    prompt=processed.all_prompts[0],
+                    seed=processed.all_seeds[0],
+                    grid=False,
+                    p=processed
+                )
             
-            if draw_individual_labels:
-                # Add labels to a copy of the image
-                process_image = process_image.copy()  # Make a copy before drawing
-                label = f"X: {x_labels[ix]}\nY: {y_labels[iy]}\nZ: {z_labels[iz]}"
-                draw_label_on_image(process_image, label)
-
-            processed_result.images[idx] = process_image
+            processed_result.images[idx] = processed.images[0]
             processed_result.all_prompts[idx] = processed.prompt
             processed_result.all_seeds[idx] = processed.seed
             processed_result.infotexts[idx] = processed.infotexts[0]
@@ -379,7 +382,6 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
             cell_size = (processed_result.width, processed_result.height)
             if processed_result.images[0] is not None:
                 cell_mode = processed_result.images[0].mode
-                # This corrects size in case of batches:
                 cell_size = processed_result.images[0].size
             processed_result.images[idx] = Image.new(cell_mode, cell_size)
 
@@ -416,30 +418,47 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
 
     if not processed_result:
         print("Unexpected error: Processing could not begin, you may need to refresh the tab or restart the service.")
-        return Processed(p, [])
+        return Processed(p, [], [])
     elif not any(processed_result.images):
         print("Unexpected error: draw_xyz_grid failed to return even a single processed image")
-        return Processed(p, [])
+        return Processed(p, [], [])
 
     z_count = len(zs)
-
+    sub_grids = []
     for i in range(z_count):
-        start_index = (i * len(xs) * len(ys)) + i
+        start_index = (i * len(xs) * len(ys))
         end_index = start_index + len(xs) * len(ys)
         grid = images.image_grid(processed_result.images[start_index:end_index], rows=len(ys))
+        
         if draw_legend:
             grid_max_w, grid_max_h = map(max, zip(*(img.size for img in processed_result.images[start_index:end_index])))
             grid = images.draw_grid_annotations(grid, grid_max_w, grid_max_h, hor_texts, ver_texts, margin_size)
+        
+        if opts.grid_save and include_sub_grids:
+            images.save_image(
+                grid,
+                p.outpath_grids,
+                f"xyz_sub_grid_{z_labels[i]}",
+                info=processed_result.infotexts[start_index],
+                extension=opts.grid_format,
+                prompt=processed_result.all_prompts[start_index],
+                seed=processed_result.all_seeds[start_index],
+                grid=True,
+                p=processed_result
+            )
+        
+        sub_grids.append(grid)
         processed_result.images.insert(i, grid)
         processed_result.all_prompts.insert(i, processed_result.all_prompts[start_index])
         processed_result.all_seeds.insert(i, processed_result.all_seeds[start_index])
         processed_result.infotexts.insert(i, processed_result.infotexts[start_index])
 
-    z_grid = images.image_grid(processed_result.images[:z_count], rows=1)
-    z_sub_grid_max_w, z_sub_grid_max_h = map(max, zip(*(img.size for img in processed_result.images[:z_count])))
+    main_grid = images.image_grid(sub_grids, rows=1)
     if draw_legend:
-        z_grid = images.draw_grid_annotations(z_grid, z_sub_grid_max_w, z_sub_grid_max_h, title_texts, [[images.GridAnnotation()]])
-    processed_result.images.insert(0, z_grid)
+        z_grid_max_w, z_grid_max_h = map(max, zip(*(img.size for img in sub_grids)))
+        main_grid = images.draw_grid_annotations(main_grid, z_grid_max_w, z_grid_max_h, title_texts, [[images.GridAnnotation()]])
+
+    processed_result.images.insert(0, main_grid)
     processed_result.infotexts.insert(0, processed_result.infotexts[0])
 
     return processed_result
