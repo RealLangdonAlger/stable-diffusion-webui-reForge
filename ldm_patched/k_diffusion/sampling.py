@@ -633,8 +633,9 @@ def sample_dpm_2(model, x, sigmas, extra_args=None, callback=None, disable=None,
 
 
 @torch.no_grad()
-def sample_dpm_2_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None):
+def sample_dpm_2_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=None, noise_sampler=None):
     """Ancestral sampling with DPM-Solver second-order steps."""
+    s_noise = modules.shared.opts.dpm2_ancestral_s_noise if s_noise is None else s_noise
     extra_args = {} if extra_args is None else extra_args
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
@@ -646,11 +647,9 @@ def sample_dpm_2_ancestral(model, x, sigmas, extra_args=None, callback=None, dis
             callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
         d = to_d(x, sigmas[i], denoised)
         if sigma_down == 0:
-            # Euler method
             dt = sigma_down - sigmas[i]
             x = x + d * dt
         else:
-            # DPM-Solver-2
             sigma_mid = sigmas[i].log().lerp(sigma_down.log(), 0.5).exp()
             dt_1 = sigma_mid - sigmas[i]
             dt_2 = sigma_down - sigmas[i]
@@ -813,7 +812,8 @@ class DPMSolver(nn.Module):
         x_3 = x - self.sigma(t_next) * h.expm1() * eps - self.sigma(t_next) / r2 * (h.expm1() / h - 1) * (eps_r2 - eps)
         return x_3, eps_cache
 
-    def dpm_solver_fast(self, x, t_start, t_end, nfe, eta=0., s_noise=1., noise_sampler=None):
+    def dpm_solver_fast(self, x, t_start, t_end, nfe, eta=0., s_noise=None, noise_sampler=None):
+        s_noise = modules.shared.opts.dpm_fast_s_noise if s_noise is None else s_noise
         noise_sampler = default_noise_sampler(x, seed=self.extra_args.get("seed", None)) if noise_sampler is None else noise_sampler
         if not t_end > t_start and eta:
             raise ValueError('eta must be 0 for reverse sampling')
@@ -852,7 +852,10 @@ class DPMSolver(nn.Module):
 
         return x
 
-    def dpm_solver_adaptive(self, x, t_start, t_end, order=3, rtol=0.05, atol=0.0078, h_init=0.05, pcoeff=0., icoeff=1., dcoeff=0., accept_safety=0.81, eta=0., s_noise=1., noise_sampler=None):
+    def dpm_solver_adaptive(self, x, t_start, t_end, order=3, rtol=0.05, atol=0.0078, h_init=0.05, 
+                       pcoeff=0., icoeff=1., dcoeff=0., accept_safety=0.81, eta=0., 
+                       s_noise=None, noise_sampler=None):
+        s_noise = modules.shared.opts.dpm_adaptive_s_noise if s_noise is None else s_noise
         noise_sampler = default_noise_sampler(x, seed=self.extra_args.get("seed", None)) if noise_sampler is None else noise_sampler
         if order not in {2, 3}:
             raise ValueError('order should be 2 or 3')
