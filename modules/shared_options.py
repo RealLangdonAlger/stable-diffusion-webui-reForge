@@ -778,6 +778,11 @@ options_templates.update(options_section(('sampler-params', "reForge Sampler Par
     "ode_custom_atol": OptionInfo(-4.0, "ODE Custom - log absolute tolerance", gr.Slider, {"minimum": -7, "maximum": 0, "step": 0.1}, infotext='ODE Custom atol').info('Default = -4.0; log10 of absolute tolerance for adaptive ODE solvers'),
     "ode_custom_max_steps": OptionInfo(250, "ODE Custom - max steps", gr.Slider, {"minimum": 1, "maximum": 500, "step": 1}, infotext='ODE Custom max steps').info('Default = 250; maximum number of steps for ODE solver'),
 
+    "dpm_fast_options": OptionHTML("<br><h3>DPM/DPM2 options</h3>"),
+    "dpm_fast_s_noise": OptionInfo(1.0, "DPM Fast s_noise", gr.Slider, {"minimum": 0.0, "maximum": 2.0, "step": 0.01}),
+    "dpm_adaptive_s_noise": OptionInfo(1.0, "DPM Adaptive s_noise", gr.Slider, {"minimum": 0.0, "maximum": 2.0, "step": 0.01}),
+    "dpm2_ancestral_s_noise": OptionInfo(1.0, "DPM2 Ancestral s_noise", gr.Slider, {"minimum": 0.0, "maximum": 2.0, "step": 0.01}),
+
     }))
 
 options_templates.update(options_section(('sampler-params', "Custom Sampler Parameters", "sd"), {
